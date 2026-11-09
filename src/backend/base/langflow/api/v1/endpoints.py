@@ -116,6 +116,7 @@ async def simple_run_flow(
     stream: bool = False,
     api_key_user: User | None = None,
     event_manager: EventManager | None = None,
+    context: dict | None = None,
 ):
     validate_input_and_tweaks(input_request)
     try:
@@ -127,7 +128,9 @@ async def simple_run_flow(
             raise ValueError(msg)
         graph_data = flow.data.copy()
         graph_data = process_tweaks(graph_data, input_request.tweaks or {}, stream=stream)
-        graph = Graph.from_payload(graph_data, flow_id=flow_id_str, user_id=str(user_id), flow_name=flow.name)
+        graph = Graph.from_payload(
+            graph_data, flow_id=flow_id_str, user_id=str(user_id), flow_name=flow.name, context=context
+        )
         inputs = None
         if input_request.input_value is not None:
             inputs = [
@@ -228,6 +231,7 @@ async def run_flow_generator(
     api_key_user: User | None,
     event_manager: EventManager,
     client_consumed_queue: asyncio.Queue,
+    context: dict | None = None,
 ) -> None:
     """Executes a flow asynchronously and manages event streaming to the client.
 
@@ -240,6 +244,7 @@ async def run_flow_generator(
         api_key_user (User | None): Optional authenticated user running the flow
         event_manager (EventManager): Manages the streaming of events to the client
         client_consumed_queue (asyncio.Queue): Tracks client consumption of events
+        context (dict | None): Optional context to pass to the flow
 
     Events Generated:
         - "add_message": Sent when new messages are added during flow execution
@@ -260,6 +265,7 @@ async def run_flow_generator(
             stream=True,
             api_key_user=api_key_user,
             event_manager=event_manager,
+            context=context,
         )
         event_manager.on_end(data={"result": result.model_dump()})
         await client_consumed_queue.get()
@@ -270,11 +276,26 @@ async def run_flow_generator(
         await event_manager.queue.put((None, None, time.time))
 
 
+async def get_flow_for_api_key_user(
+    flow_id_or_name: str,
+    api_key_user: Annotated[UserRead, Depends(api_key_security)],
+) -> FlowRead:
+    """Look up a flow owned by the authenticated API-key user."""
+    flow = await get_flow_by_id_or_endpoint_name(flow_id_or_name, api_key_user.id)
+    # The helper only applies user scoping to endpoint-name lookups.
+    if flow is None or flow.user_id != api_key_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Flow identifier {flow_id_or_name} not found",
+        )
+    return flow
+
+
 @router.post("/run/{flow_id_or_name}", response_model=None, response_model_exclude_none=True)
 async def simplified_run_flow(
     *,
     background_tasks: BackgroundTasks,
-    flow: Annotated[FlowRead | None, Depends(get_flow_by_id_or_endpoint_name)],
+    flow: Annotated[FlowRead | None, Depends(get_flow_for_api_key_user)],
     input_request: SimplifiedAPIRequest | None = None,
     stream: bool = False,
     api_key_user: Annotated[UserRead, Depends(api_key_security)],
@@ -528,6 +549,7 @@ async def experimental_run_flow(
     This endpoint facilitates complex flow executions with customized inputs, outputs, and configurations,
     catering to diverse application requirements.
     """  # noqa: E501
+    await get_flow_for_api_key_user(str(flow_id), api_key_user)
     session_service = get_session_service()
     flow_id_str = str(flow_id)
     if outputs is None:

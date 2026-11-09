@@ -277,15 +277,24 @@ def get_arg_names(inputs: list[Vertex]) -> list[dict[str, str]]:
 
 async def get_flow_by_id_or_endpoint_name(flow_id_or_name: str, user_id: str | UUID | None = None) -> FlowRead | None:
     async with session_scope() as session:
-        endpoint_name = None
+        uuid_user_id: UUID | None = None
+        if user_id is not None:
+            try:
+                uuid_user_id = UUID(user_id) if isinstance(user_id, str) else user_id
+            except (ValueError, AttributeError) as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Flow identifier {flow_id_or_name} not found",
+                ) from exc
         try:
             flow_id = UUID(flow_id_or_name)
             flow = await session.get(Flow, flow_id)
+            if flow is not None and uuid_user_id is not None and flow.user_id != uuid_user_id:
+                flow = None
         except ValueError:
             endpoint_name = flow_id_or_name
             stmt = select(Flow).where(Flow.endpoint_name == endpoint_name)
-            if user_id:
-                uuid_user_id = UUID(user_id) if isinstance(user_id, str) else user_id
+            if uuid_user_id is not None:
                 stmt = stmt.where(Flow.user_id == uuid_user_id)
             flow = (await session.exec(stmt)).first()
         if flow is None:
